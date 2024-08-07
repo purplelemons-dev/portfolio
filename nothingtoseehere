@@ -1,0 +1,114 @@
+// In your background script or service worker
+
+// Generate a random salt for key derivation
+function generateSalt() {
+  return crypto.getRandomValues(new Uint8Array(16));
+}
+
+// Derive a key from the PIN and salt
+async function deriveKey(pin, salt) {
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(pin),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveBits', 'deriveKey']
+  );
+  
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: salt,
+      iterations: 100000,
+      hash: 'SHA-256'
+    },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+// Encrypt data
+async function encryptData(data, key) {
+  const encoder = new TextEncoder();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  
+  const encryptedContent = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv },
+    key,
+    encoder.encode(JSON.stringify(data))
+  );
+  
+  return {
+    iv: Array.from(iv),
+    content: Array.from(new Uint8Array(encryptedContent))
+  };
+}
+
+// Decrypt data
+async function decryptData(encryptedData, key) {
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: new Uint8Array(encryptedData.iv) },
+    key,
+    new Uint8Array(encryptedData.content)
+  );
+  
+  const decoder = new TextDecoder();
+  return JSON.parse(decoder.decode(decrypted));
+}
+
+// Save encrypted data
+async function saveEncryptedData(pin, data) {
+  const salt = generateSalt();
+  const key = await deriveKey(pin, salt);
+  const encryptedData = await encryptData(data, key);
+  
+  chrome.storage.local.set({
+    encryptedData: encryptedData,
+    salt: Array.from(salt)
+  });
+}
+
+// Load and decrypt data
+async function loadDecryptedData(pin) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(['encryptedData', 'salt'], async (result) => {
+      if (result.encryptedData && result.salt) {
+        const key = await deriveKey(pin, new Uint8Array(result.salt));
+        try {
+          const decryptedData = await decryptData(result.encryptedData, key);
+          resolve(decryptedData);
+        } catch (error) {
+          reject(new Error('Incorrect PIN or data corruption'));
+        }
+      } else {
+        reject(new Error('No encrypted data found'));
+      }
+    });
+  });
+}
+
+// Example usage
+chrome.runtime.onInstalled.addListener(() => {
+  // Save encrypted data when the extension is installed
+  const sensitiveData = { username: 'user123', apiKey: 'secret_key_123' };
+  saveEncryptedData('1234', sensitiveData);
+});
+
+// Handle extension startup
+chrome.runtime.onStartup.addListener(() => {
+  // Prompt user for PIN (implement this in your UI)
+  const userPin = '1234'; // This should come from user input
+  
+  loadDecryptedData(userPin)
+    .then(decryptedData => {
+      console.log('Decrypted data:', decryptedData);
+      // Use the decrypted data in your extension
+    })
+    .catch(error => {
+      console.error('Error loading data:', error.message);
+      // Handle incorrect PIN or missing data
+    });
+});
